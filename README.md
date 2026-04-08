@@ -1,6 +1,6 @@
 # SNESC0RE X
 
-SNESC0RE X is based on SNESCORE
+SNESC0RE X is based on SNESCORE by BrinooTk
 
 ## Requirements
 
