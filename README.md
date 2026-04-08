@@ -39,6 +39,5 @@ python .\snes_launcher.py <PS5_IP>
 
 ## TODO
 
-- Sega Genesis / Mega Drive emulator
-- Improve save game
-- Future planning for a PS1 emulator
+Add Second Controller
+Add Support for Enhancement Chips
