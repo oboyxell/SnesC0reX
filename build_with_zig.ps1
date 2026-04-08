@@ -1,155 +1,146 @@
 param(
-    [ValidateSet("snes")]
-    [string]$Target = "snes"
+    [string]$ProjectRoot = (Get-Location).Path
 )
 
 $ErrorActionPreference = "Stop"
-Set-StrictMode -Version Latest
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Split-Path -Parent $ScriptDir
-$BuildDir = Join-Path $ProjectRoot "compiled"
-$ObjDir = Join-Path $BuildDir "obj"
+function Get-RelativeProjectPath([string]$Root, [string]$FullPath) {
+    $rootNorm = [System.IO.Path]::GetFullPath($Root)
+    $fullNorm = [System.IO.Path]::GetFullPath($FullPath)
+    if ($fullNorm.StartsWith($rootNorm, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $fullNorm.Substring($rootNorm.Length)
+        if ($rel.StartsWith("\") -or $rel.StartsWith("/")) {
+            $rel = $rel.Substring(1)
+        }
+        return $rel
+    }
+    return [System.IO.Path]::GetFileName($FullPath)
+}
 
-Set-Location $ScriptDir
+function Find-Tool([string]$Name) {
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
 
 function Find-Zig {
-    $cmd = Get-Command zig -ErrorAction SilentlyContinue
-    if ($cmd) {
-        return $cmd.Source
-    }
-
-    $wingetBase = Join-Path $env:LOCALAPPDATA "Microsoft\\WinGet\\Packages"
-    if (Test-Path $wingetBase) {
-        $zig = Get-ChildItem $wingetBase -Recurse -Filter zig.exe -ErrorAction SilentlyContinue |
-            Sort-Object FullName |
-            Select-Object -First 1 -ExpandProperty FullName
-        if ($zig) {
-            return $zig
-        }
-    }
-
-    throw "zig.exe not found. Install Zig first."
+    $zig = Find-Tool "zig"
+    if ($zig) { return $zig }
+    throw "zig.exe not found in PATH. Install Zig and add it to PATH first."
 }
 
-function Ensure-ParentDir {
-    param([string]$Path)
-    $parent = Split-Path -Parent $Path
-    if ($parent -and -not (Test-Path $parent)) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    }
-}
+function Find-Lld([string]$zigPath) {
+    $cmd = Find-Tool "ld.lld"
+    if ($cmd) { return $cmd }
 
-function Get-RelativePathCompat {
-    param(
-        [string]$ProjectDir,
-        [string]$SourcePath
+    $zigDir = Split-Path $zigPath -Parent
+    $candidates = @(
+        (Join-Path $zigDir "ld.lld.exe"),
+        (Join-Path $zigDir "ld.lld")
     )
-
-    if ([System.IO.Path]::IsPathRooted($SourcePath)) {
-        $fullSource = [System.IO.Path]::GetFullPath($SourcePath)
-    } else {
-        $fullSource = [System.IO.Path]::GetFullPath((Join-Path $ProjectDir $SourcePath))
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
     }
-    $projectUri = New-Object System.Uri(([System.IO.Path]::GetFullPath($ProjectDir).TrimEnd('\') + '\'))
-    $sourceUri = New-Object System.Uri($fullSource)
-    return [System.Uri]::UnescapeDataString($projectUri.MakeRelativeUri($sourceUri).ToString()).Replace('/', '\')
+    throw "ld.lld not found. Install LLVM or use a Zig package that includes ld.lld."
 }
 
-function Get-RelativeObjectPath {
-    param(
-        [string]$ProjectDir,
-        [string]$SourcePath
-    )
+function Find-Objcopy([string]$zigPath) {
+    $cmd = Find-Tool "llvm-objcopy"
+    if ($cmd) { return $cmd }
 
-    $relativeSource = Get-RelativePathCompat -ProjectDir $ProjectDir -SourcePath $SourcePath
-    return [System.IO.Path]::ChangeExtension($relativeSource, ".o")
+    $zigDir = Split-Path $zigPath -Parent
+    $candidates = @(
+        (Join-Path $zigDir "llvm-objcopy.exe"),
+        (Join-Path $zigDir "llvm-objcopy")
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    throw "llvm-objcopy not found. Install LLVM or use a Zig package that includes llvm-objcopy."
 }
 
-function Compile-Target {
-    param(
-        [string]$Zig,
-        [string[]]$Sources
-    )
+$ProjectRoot = (Resolve-Path $ProjectRoot).Path
+Set-Location $ProjectRoot
 
-    $commonArgs = @(
-        "-target", "x86_64-freestanding-none",
-        "-Os",
-        "-ffreestanding",
-        "-fno-stack-protector",
-        "-fno-builtin",
-        "-fpie",
-        "-mno-red-zone",
-        "-mstackrealign",
-        "-fomit-frame-pointer",
-        "-fcf-protection=none",
-        "-fno-exceptions",
-        "-fno-unwind-tables",
-        "-fno-asynchronous-unwind-tables",
-        "-Wall",
-        "-Wno-unused-function",
-        "-Isrc"
-    )
+$BuildDir = Join-Path $ProjectRoot "compiled"
+$ObjDir   = Join-Path $BuildDir "obj"
 
-    if (-not (Test-Path $BuildDir)) {
-        New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
-    }
-
-    $objs = @()
-    foreach ($src in $Sources) {
-        $fullSrc = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir $src))
-        $relativeObj = Get-RelativeObjectPath -ProjectDir $ScriptDir -SourcePath $src
-        $obj = Join-Path $ObjDir $relativeObj
-        Ensure-ParentDir $obj
-
-        Write-Host "Compiling $src"
-        & $Zig cc @commonArgs -c $fullSrc -o $obj
-        if ($LASTEXITCODE -ne 0) {
-            throw "compile failed: $src"
-        }
-        $objs += $obj
-    }
-
-    $elf = Join-Path $BuildDir "snes_emu.elf"
-    $bin = Join-Path $BuildDir "snes_emu.bin"
-    Ensure-ParentDir $elf
-
-    $linkArgs = @(
-        "cc"
-    ) + $commonArgs + @(
-        "-T", "linker.ld",
-        "-nostdlib",
-        "-nostartfiles",
-        "-static",
-        "-Wl,--build-id=none",
-        "-no-pie",
-        "-o", $elf
-    ) + $objs
-
-    & $Zig @linkArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "link failed: $elf"
-    }
-
-    & $Zig objcopy -O binary $elf $bin
-    if ($LASTEXITCODE -ne 0) {
-        throw "objcopy failed: $bin"
-    }
-
-    Get-Item $elf, $bin | Select-Object Name, Length
-}
-
-$zig = Find-Zig
-Write-Host "Using Zig: $zig"
-
-$snesSources = @(
-    "src/snes_main.c",
-    "src/snes_runtime.c",
-    "src/ftp.c"
-) + (
-    Get-ChildItem "src/snes" -Filter "*.c" |
-    Sort-Object Name |
-    ForEach-Object { Get-RelativePathCompat -ProjectDir $ScriptDir -SourcePath $_.FullName }
+$CFlags = @(
+    "-target", "x86_64-freestanding-none",
+    "-Os",
+    "-ffreestanding",
+    "-fno-stack-protector",
+    "-fno-builtin",
+    "-fpie",
+    "-mno-red-zone",
+    "-mstackrealign",
+    "-fomit-frame-pointer",
+    "-fcf-protection=none",
+    "-fno-exceptions",
+    "-fno-unwind-tables",
+    "-fno-asynchronous-unwind-tables",
+    "-Wall",
+    "-Wno-unused-function",
+    "-Isrc"
 )
 
-Compile-Target -Zig $zig -Sources $snesSources
+$zigPath = Find-Zig
+$lld     = Find-Lld $zigPath
+$objcopy = Find-Objcopy $zigPath
+
+if (Test-Path $ObjDir) {
+    Remove-Item $ObjDir -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $ObjDir | Out-Null
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
+$srcRoot = Join-Path $ProjectRoot "src"
+$coreSources = Get-ChildItem (Join-Path $srcRoot "snes") -Filter *.c | Sort-Object Name | ForEach-Object { $_.FullName }
+$mainSources = @(
+    (Join-Path $srcRoot "snes_main.c"),
+    (Join-Path $srcRoot "snes_runtime.c"),
+    (Join-Path $srcRoot "ftp.c")
+)
+$sources = $mainSources + $coreSources
+
+$objects = @()
+
+foreach ($src in $sources) {
+    $relative = Get-RelativeProjectPath $ProjectRoot $src
+    $obj = Join-Path $ObjDir (($relative -replace '\\','/') + ".o")
+    $objDir = Split-Path $obj -Parent
+    New-Item -ItemType Directory -Force -Path $objDir | Out-Null
+
+    Write-Host "Compiling $relative"
+    & $zigPath cc @CFlags -c $src -o $obj
+    if ($LASTEXITCODE -ne 0) {
+        throw "Compilation failed for $relative"
+    }
+    $objects += $obj
+}
+
+$elf = Join-Path $BuildDir "snes_emu.elf"
+$bin = Join-Path $BuildDir "snes_emu.bin"
+
+Write-Host "Linking compiled\snes_emu.elf"
+$linkArgs = @(
+    "-m", "elf_x86_64",
+    "-pie",
+    "--script", "linker.ld",
+    "-e", "_start",
+    "-o", $elf
+) + $objects
+
+& $lld @linkArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Link failed"
+}
+
+Write-Host "Writing compiled\snes_emu.bin"
+& $objcopy -O binary $elf $bin
+if ($LASTEXITCODE -ne 0) {
+    throw "objcopy failed"
+}
+
+$size = (Get-Item $bin).Length
+Write-Host "Built: $bin ($size bytes)"

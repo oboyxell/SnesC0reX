@@ -1,4 +1,4 @@
-﻿-- BrunoRoque SNES EMU
+-- BrunoRoque SNES EMU
 
 local sc = ""
 
@@ -65,7 +65,7 @@ local html_body = [=[
       name="viewport"
       content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"
     />
-<title>BrunoRoque SNES</title>
+<title>BrunoRoque SNES P1/P2 Lite</title>
     <style>
       @import url("https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Orbitron:wght@400;700;900&display=swap");
       * {
@@ -640,7 +640,12 @@ local html_body = [=[
       <div class="screen-bar">
         <span class="screen-label">NES CONTROLLER</span>
         <button class="hid-btn" id="hid-btn">&#x1F3AE; CONNECT</button>
-        <div class="status-wrap">
+        
+      <div class="player-switch" style="display:flex;gap:6px;align-items:center;margin-right:10px;">
+        <button class="hid-btn show" id="p1-btn" style="display:inline-block;padding:3px 10px;">P1</button>
+        <button class="hid-btn" id="p2-btn" style="display:inline-block;padding:3px 10px;">P2</button>
+      </div>
+      <div class="status-wrap">
           <div class="status-dot" id="dot"></div>
           <span id="status">CONNECTING...</span>
         </div>
@@ -720,7 +725,10 @@ local html_body = [=[
           gpIdx = null;
         function doSend() {
           try {
-            fetch("/b" + state, { method: "POST", keepalive: true });
+            if (activePort === 1) {
+              fetch("/b" + state, { method: "POST", keepalive: true });
+            }
+            fetch("/p" + activePort + "/b" + state, { method: "POST", keepalive: true });
           } catch (e) {}
           if (!connected) {
             connected = true;
