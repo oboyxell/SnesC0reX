@@ -38,6 +38,5 @@ python .\snes_launcher.py <PS5_IP>
 - `L1 + DPAD DOWN + START (Options on DualSense)` = return to the game list
 
 ## TODO
-
-Add Second Controller
+Add Second Controller | 
 Add Support for Enhancement Chips
