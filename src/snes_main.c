@@ -122,6 +122,107 @@ static int flush_battery_save(void *G, void *kopen, void *kwrite, void *kclose,
                               Snes *snes, u8 *buf,
                               const char *primary_path, const char *ftp_path);
 
+static int log_append_char(char *buf, int pos, int max, char ch);
+static int log_append_str(char *buf, int pos, int max, const char *s);
+static int log_append_s32(char *buf, int pos, int max, s32 value);
+static int log_append_hex_u32(char *buf, int pos, int max, u32 value);
+static void log_pad_open_diag(void *G, void *sendto_fn, s32 log_fd, u8 *log_sa,
+                              void *kwrite, s32 diag_fd,
+                              s32 userId, s32 pad_h1, s32 pad_h2,
+                              s32 probe_t0_i1, s32 probe_t1_i1, s32 probe_t1_i0);
+static void log_pad_read_diag(void *G, void *sendto_fn, s32 log_fd, u8 *log_sa,
+                              void *kwrite, s32 diag_fd,
+                              const char *tag, s32 rc, u16 state, int action);
+
+
+static int log_append_char(char *buf, int pos, int max, char ch) {
+    if (pos < max - 1) buf[pos] = ch;
+    return pos + 1;
+}
+
+static int log_append_str(char *buf, int pos, int max, const char *s) {
+    if (!s) s = "(null)";
+    while (*s) {
+        pos = log_append_char(buf, pos, max, *s);
+        s++;
+    }
+    return pos;
+}
+
+static int log_append_s32(char *buf, int pos, int max, s32 value) {
+    char tmp[16];
+    int n = 0;
+    u32 u;
+    if (value == 0) return log_append_char(buf, pos, max, '0');
+    if (value < 0) {
+        pos = log_append_char(buf, pos, max, '-');
+        u = (u32)(-value);
+    } else {
+        u = (u32)value;
+    }
+    while (u && n < (int)sizeof(tmp)) {
+        tmp[n++] = (char)('0' + (u % 10));
+        u /= 10;
+    }
+    while (n > 0) pos = log_append_char(buf, pos, max, tmp[--n]);
+    return pos;
+}
+
+static int log_append_hex_u32(char *buf, int pos, int max, u32 value) {
+    char tmp[8];
+    int n = 0;
+    if (value == 0) return log_append_char(buf, pos, max, '0');
+    while (value && n < (int)sizeof(tmp)) {
+        u32 d = value & 0xF;
+        tmp[n++] = (char)(d < 10 ? ('0' + d) : ('A' + (d - 10)));
+        value >>= 4;
+    }
+    while (n > 0) pos = log_append_char(buf, pos, max, tmp[--n]);
+    return pos;
+}
+
+static void log_pad_open_diag(void *G, void *sendto_fn, s32 log_fd, u8 *log_sa,
+                              void *kwrite, s32 diag_fd,
+                              s32 userId, s32 pad_h1, s32 pad_h2,
+                              s32 probe_t0_i1, s32 probe_t1_i1, s32 probe_t1_i0) {
+    char msg[192];
+    int p = 0;
+    p = log_append_str(msg, p, (int)sizeof(msg), "PAD OPEN uid=");
+    p = log_append_s32(msg, p, (int)sizeof(msg), userId);
+    p = log_append_str(msg, p, (int)sizeof(msg), " p1=");
+    p = log_append_s32(msg, p, (int)sizeof(msg), pad_h1);
+    p = log_append_str(msg, p, (int)sizeof(msg), " p2=");
+    p = log_append_s32(msg, p, (int)sizeof(msg), pad_h2);
+    p = log_append_str(msg, p, (int)sizeof(msg), " t0i1=");
+    p = log_append_s32(msg, p, (int)sizeof(msg), probe_t0_i1);
+    p = log_append_str(msg, p, (int)sizeof(msg), " t1i1=");
+    p = log_append_s32(msg, p, (int)sizeof(msg), probe_t1_i1);
+    p = log_append_str(msg, p, (int)sizeof(msg), " t1i0=");
+    p = log_append_s32(msg, p, (int)sizeof(msg), probe_t1_i0);
+    p = log_append_char(msg, p, (int)sizeof(msg), '\n');
+    if (p >= (int)sizeof(msg)) p = (int)sizeof(msg) - 1;
+    msg[p] = 0;
+    diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, msg);
+}
+
+static void log_pad_read_diag(void *G, void *sendto_fn, s32 log_fd, u8 *log_sa,
+                              void *kwrite, s32 diag_fd,
+                              const char *tag, s32 rc, u16 state, int action) {
+    char msg[128];
+    int p = 0;
+    p = log_append_str(msg, p, (int)sizeof(msg), tag);
+    p = log_append_str(msg, p, (int)sizeof(msg), " rc=");
+    p = log_append_s32(msg, p, (int)sizeof(msg), rc);
+    p = log_append_str(msg, p, (int)sizeof(msg), " state=0x");
+    p = log_append_hex_u32(msg, p, (int)sizeof(msg), (u32)state);
+    p = log_append_str(msg, p, (int)sizeof(msg), " action=");
+    p = log_append_s32(msg, p, (int)sizeof(msg), (s32)action);
+    p = log_append_char(msg, p, (int)sizeof(msg), '\n');
+    if (p >= (int)sizeof(msg)) p = (int)sizeof(msg) - 1;
+    msg[p] = 0;
+    diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, msg);
+}
+
 int str_len(const char *s) {
     int n = 0;
     while (*s++) n++;
@@ -662,13 +763,41 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
     void *pad_geth = SYM(G, D, pad_mod, "scePadGetHandle");
     void *pad_read = SYM(G, D, pad_mod, "scePadRead");
     if (pad_init_fn) NC(G, pad_init_fn, 0, 0, 0, 0, 0, 0);
-    s32 pad_h = -1;
-    if (pad_geth) pad_h = (s32)NC(G, pad_geth, (u64)userId, 0, 0, 0, 0, 0);
-    u8 pad_buf[SNES_PAD_BUF_SIZE];
+
+    /*
+     * P1 uses controller slot 0.
+     * P2 uses controller slot 1.
+     *
+     * The original build only opened one pad handle and only fed SNES port 1.
+     * The core already exposes input1 + input2, so we wire both here.
+     */
+    s32 pad_h1 = -1;
+    s32 pad_h2 = -1;
+    s32 pad_probe_t0_i1 = -1;
+    s32 pad_probe_t1_i1 = -1;
+    s32 pad_probe_t1_i0 = -1;
+    if (pad_geth) {
+        pad_h1 = (s32)NC(G, pad_geth, (u64)userId, 0, 0, 0, 0, 0);
+        pad_probe_t0_i1 = (s32)NC(G, pad_geth, (u64)userId, 0, 1, 0, 0, 0);
+        pad_h2 = pad_probe_t0_i1;
+        if (pad_h2 < 0) {
+            pad_probe_t1_i1 = (s32)NC(G, pad_geth, (u64)userId, 1, 1, 0, 0, 0);
+            if (pad_probe_t1_i1 >= 0) {
+                pad_h2 = pad_probe_t1_i1;
+            } else {
+                pad_probe_t1_i0 = (s32)NC(G, pad_geth, (u64)userId, 1, 0, 0, 0, 0);
+                if (pad_probe_t1_i0 >= 0 && pad_probe_t1_i0 != pad_h1) pad_h2 = pad_probe_t1_i0;
+            }
+        }
+    }
+    u8 pad1_buf[SNES_PAD_BUF_SIZE];
+    u8 pad2_buf[SNES_PAD_BUF_SIZE];
     ext->step = 18;
 
     diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, "BrunoRoque SNES EMU\n");
-    diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, pad_h >= 0 ? "Native pad OK\n" : "Native pad N/A\n");
+    diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, pad_h1 >= 0 ? "Native pad P1 OK\n" : "Native pad P1 N/A\n");
+    diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, pad_h2 >= 0 ? "Native pad P2 OK\n" : "Native pad P2 N/A\n");
+    log_pad_open_diag(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, userId, pad_h1, pad_h2, pad_probe_t0_i1, pad_probe_t1_i1, pad_probe_t1_i0);
 
     struct rom_entry *roms = (struct rom_entry *)NC(G, mmap, 0, sizeof(struct rom_entry) * MAX_ROMS, 3, 0x1002, (u64)-1, 0);
     int rom_count = 0;
@@ -716,7 +845,7 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
                             int dup = 0;
                             for (int j = 0; j < rom_count; j++) {
                                 int match = 1;
-                                for (int c = 0; c < 47; c++) {
+                                for (int c = 0; c < MAX_ROM_FILENAME - 1; c++) {
                                     if (roms[j].filename[c] != name[c]) { match = 0; break; }
                                     if (!name[c]) break;
                                 }
@@ -724,7 +853,7 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
                             }
                             if (!dup) {
                                 int k = 0;
-                                while (name[k] && k < 47) { roms[rom_count].filename[k] = name[k]; k++; }
+                                while (name[k] && k < MAX_ROM_FILENAME - 1) { roms[rom_count].filename[k] = name[k]; k++; }
                                 roms[rom_count].filename[k] = 0;
                                 extract_rom_name(name, roms[rom_count].display, MAX_NAME);
                                 rom_count++;
@@ -774,7 +903,8 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
             for (;;) {
                 u16 btn = 0;
                 int action = 0;
-                if (read_native_pad(G, pad_read, pad_h, pad_buf, &btn, &action) < 0) {
+                /* Menu navigation stays on player 1 only. */
+                if (read_native_pad(G, pad_read, pad_h1, pad1_buf, &btn, &action) < 0) {
                     btn = 0;
                     action = 0;
                 }
@@ -863,25 +993,32 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
             }
         }
 
-        char rom_path[96];
+        char rom_path[256];
         char save_primary_path[160];
         char save_ftp_path[160];
         {
             int pi = 0;
             const char *p = rom_dir;
-            while (*p) rom_path[pi++] = *p++;
+            while (*p && pi < (int)sizeof(rom_path) - 1) rom_path[pi++] = *p++;
             const char *f = roms[selected].filename;
-            while (*f && pi < 94) rom_path[pi++] = *f++;
+            while (*f && pi < (int)sizeof(rom_path) - 1) rom_path[pi++] = *f++;
             rom_path[pi] = 0;
             build_save_path(save_primary_path, sizeof(save_primary_path), SNES_SAVE_DIR_PRIMARY, roms[selected].filename);
             build_save_path(save_ftp_path, sizeof(save_ftp_path), SNES_SAVE_DIR_FTP, roms[selected].filename);
+            diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, "SNES ROM filename=");
+            diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, roms[selected].filename);
+            diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, "\n");
+            diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, "SNES ROM display=");
+            diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, roms[selected].display);
+            diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, "\n");
         }
 
         u8 *snes_pixels = (u8 *)-1;
         u8 *rom_file_buf = (u8 *)-1;
         u8 *heap_area = (u8 *)-1;
         u8 *scratch = (u8 *)-1;
-        u8 *game_pad_buf = 0;
+        u8 *game_pad1_buf = 0;
+        u8 *game_pad2_buf = 0;
         u8 *battery_buf = 0;
         struct snes_audio *audio = 0;
         s16 *frame_samples = 0;
@@ -937,7 +1074,8 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
             goto game_cleanup;
         }
 
-        game_pad_buf = scratch;
+        game_pad1_buf = pad1_buf;
+        game_pad2_buf = pad2_buf;
         audio = (struct snes_audio *)(scratch + scratch_audio_off);
         frame_samples = (s16 *)(scratch + scratch_frame_off);
         battery_buf = scratch + scratch_battery_off;
@@ -1020,24 +1158,40 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
         int widescreen = 0;
         int video_layout_dirty = 0;
         int autosave_counter = 0;
+        int pad_diag_logged = 0;
         back_to_menu = 0;
         ext->step = 62;
         diag_log(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, "SNES entering frame loop\n");
         for (;;) {
-            u16 pad_state = 0;
-            int action = 0;
-            if (read_native_pad(G, pad_read, pad_h, game_pad_buf, &pad_state, &action) < 0) {
-                pad_state = 0;
-                action = 0;
+            u16 pad1_state = 0;
+            u16 pad2_state = 0;
+            int action1 = 0;
+            int action2 = 0;
+
+            s32 pad1_rc = read_native_pad(G, pad_read, pad_h1, game_pad1_buf, &pad1_state, &action1);
+            if (pad1_rc < 0) {
+                pad1_state = 0;
+                action1 = 0;
+            }
+            s32 pad2_rc = read_native_pad(G, pad_read, pad_h2, game_pad2_buf, &pad2_state, &action2);
+            if (pad2_rc < 0) {
+                pad2_state = 0;
+                action2 = 0;
+            }
+            if (!pad_diag_logged) {
+                log_pad_read_diag(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, "PAD1 READ", pad1_rc, pad1_state, action1);
+                log_pad_read_diag(G, sendto_fn, log_fd, log_sa, kwrite, diag_fd, "PAD2 READ", pad2_rc, pad2_state, action2);
+                pad_diag_logged = 1;
             }
 
-            if (action == 2) { want_exit = 1; break; }
-            if (action == 1) { back_to_menu = 1; break; }
-            if ((pad_state & (BTN_DOWN | BTN_L | BTN_START)) == (BTN_DOWN | BTN_L | BTN_START)) {
+            /* Keep system/menu/debug controls on player 1 only. */
+            if (action1 == 2) { want_exit = 1; break; }
+            if (action1 == 1) { back_to_menu = 1; break; }
+            if ((pad1_state & (BTN_DOWN | BTN_L | BTN_START)) == (BTN_DOWN | BTN_L | BTN_START)) {
                 back_to_menu = 1;
                 break;
             }
-            if ((pad_state & (BTN_L | BTN_R | BTN_START | BTN_R2)) == (BTN_L | BTN_R | BTN_START | BTN_R2)) {
+            if ((pad1_state & (BTN_L | BTN_R | BTN_START | BTN_R2)) == (BTN_L | BTN_R | BTN_START | BTN_R2)) {
                 if (!debug_combo_latch) {
                     widescreen = !widescreen;
                     video_layout_dirty = 1;
@@ -1047,7 +1201,7 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
                     );
                     debug_combo_latch = 1;
                 }
-            } else if ((pad_state & (BTN_L | BTN_R | BTN_X)) == (BTN_L | BTN_R | BTN_X)) {
+            } else if ((pad1_state & (BTN_L | BTN_R | BTN_X)) == (BTN_L | BTN_R | BTN_X)) {
                 if (!debug_combo_latch) {
                     snes->debugDisableHdma = !snes->debugDisableHdma;
                     diag_log(
@@ -1056,7 +1210,7 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
                     );
                     debug_combo_latch = 1;
                 }
-            } else if ((pad_state & (BTN_L | BTN_R | BTN_Y)) == (BTN_L | BTN_R | BTN_Y)) {
+            } else if ((pad1_state & (BTN_L | BTN_R | BTN_Y)) == (BTN_L | BTN_R | BTN_Y)) {
                 if (!debug_combo_latch) {
                     snes->debugDisableColorMath = !snes->debugDisableColorMath;
                     diag_log(
@@ -1069,18 +1223,31 @@ void _start(u64 eboot_base, u64 dlsym_addr, struct ext_args *ext) {
                 debug_combo_latch = 0;
             }
 
-            snes_setButtonState(snes, 1, 0, (pad_state & BTN_B) != 0);
-            snes_setButtonState(snes, 1, 1, (pad_state & BTN_Y) != 0);
-            snes_setButtonState(snes, 1, 2, (pad_state & BTN_SELECT) != 0);
-            snes_setButtonState(snes, 1, 3, (pad_state & BTN_START) != 0);
-            snes_setButtonState(snes, 1, 4, (pad_state & BTN_UP) != 0);
-            snes_setButtonState(snes, 1, 5, (pad_state & BTN_DOWN) != 0);
-            snes_setButtonState(snes, 1, 6, (pad_state & BTN_LEFT) != 0);
-            snes_setButtonState(snes, 1, 7, (pad_state & BTN_RIGHT) != 0);
-            snes_setButtonState(snes, 1, 8, (pad_state & BTN_A) != 0);
-            snes_setButtonState(snes, 1, 9, (pad_state & BTN_X) != 0);
-            snes_setButtonState(snes, 1, 10, (pad_state & BTN_L) != 0);
-            snes_setButtonState(snes, 1, 11, (pad_state & BTN_R) != 0);
+            snes_setButtonState(snes, 1, 0, (pad1_state & BTN_B) != 0);
+            snes_setButtonState(snes, 1, 1, (pad1_state & BTN_Y) != 0);
+            snes_setButtonState(snes, 1, 2, (pad1_state & BTN_SELECT) != 0);
+            snes_setButtonState(snes, 1, 3, (pad1_state & BTN_START) != 0);
+            snes_setButtonState(snes, 1, 4, (pad1_state & BTN_UP) != 0);
+            snes_setButtonState(snes, 1, 5, (pad1_state & BTN_DOWN) != 0);
+            snes_setButtonState(snes, 1, 6, (pad1_state & BTN_LEFT) != 0);
+            snes_setButtonState(snes, 1, 7, (pad1_state & BTN_RIGHT) != 0);
+            snes_setButtonState(snes, 1, 8, (pad1_state & BTN_A) != 0);
+            snes_setButtonState(snes, 1, 9, (pad1_state & BTN_X) != 0);
+            snes_setButtonState(snes, 1, 10, (pad1_state & BTN_L) != 0);
+            snes_setButtonState(snes, 1, 11, (pad1_state & BTN_R) != 0);
+
+            snes_setButtonState(snes, 2, 0, (pad2_state & BTN_B) != 0);
+            snes_setButtonState(snes, 2, 1, (pad2_state & BTN_Y) != 0);
+            snes_setButtonState(snes, 2, 2, (pad2_state & BTN_SELECT) != 0);
+            snes_setButtonState(snes, 2, 3, (pad2_state & BTN_START) != 0);
+            snes_setButtonState(snes, 2, 4, (pad2_state & BTN_UP) != 0);
+            snes_setButtonState(snes, 2, 5, (pad2_state & BTN_DOWN) != 0);
+            snes_setButtonState(snes, 2, 6, (pad2_state & BTN_LEFT) != 0);
+            snes_setButtonState(snes, 2, 7, (pad2_state & BTN_RIGHT) != 0);
+            snes_setButtonState(snes, 2, 8, (pad2_state & BTN_A) != 0);
+            snes_setButtonState(snes, 2, 9, (pad2_state & BTN_X) != 0);
+            snes_setButtonState(snes, 2, 10, (pad2_state & BTN_L) != 0);
+            snes_setButtonState(snes, 2, 11, (pad2_state & BTN_R) != 0);
 
             int run_game = 1;
             if (snes->palTiming) {

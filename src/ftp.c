@@ -232,7 +232,7 @@ static void cmd_stor(struct ftp_ctx *f, const char *arg) {
     if (is_rom_file(fn) && f->roms && f->rom_count < f->max_roms) {
         struct rom_entry *r = &f->roms[f->rom_count];
         int k = 0;
-        while (fn[k] && k < 47) { r->filename[k] = fn[k]; k++; }
+        while (fn[k] && k < MAX_ROM_FILENAME - 1) { r->filename[k] = fn[k]; k++; }
         r->filename[k] = 0;
         k = 0;
         for (int i = 0; fn[i] && fn[i] != '.' && k < MAX_NAME - 1; i++)

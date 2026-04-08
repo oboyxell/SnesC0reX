@@ -5,9 +5,10 @@
 
 #define MAX_ROMS 4096
 #define MAX_NAME 28
+#define MAX_ROM_FILENAME 160
 
 struct rom_entry {
-    char filename[48];
+    char filename[MAX_ROM_FILENAME];
     char display[MAX_NAME];
 };
 
