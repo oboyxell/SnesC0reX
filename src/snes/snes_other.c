@@ -48,27 +48,64 @@ typedef struct CartHeader {
 
 static void readHeader(const uint8_t* data, int length, int location, CartHeader* header);
 
+static uint32_t decodeHeaderSizeField(uint8_t value) {
+  if(value == 0) return 0;
+  if(value >= 0x1c) return 0;
+  return 0x400u << value;
+}
+
+static int countPrintableAscii(const char* s, int limit) {
+  int count = 0;
+  for(int i = 0; i < limit && s[i]; i++) {
+    if(s[i] >= 0x20 && s[i] < 0x7f && s[i] != '.') count++;
+  }
+  return count;
+}
+
+static const char* cartTypeName(int cartType) {
+  switch(cartType) {
+    case 1: return "LoROM";
+    case 2: return "HiROM";
+    case 3: return "ExHiROM";
+    default: return "Unsupported";
+  }
+}
+
+static void logHeaderCandidate(int slot, const CartHeader* header) {
+  printf(
+    "HDR[%d] score=%d map=%s pal=%d speed=%u type=%u copro=%u chips=%u rawRom=%u rawRam=%u name=\"%s\"\n",
+    slot, header->score, cartTypeName(header->cartType), header->pal ? 1 : 0,
+    header->speed, header->type, header->coprocessor, header->chips,
+    (unsigned)header->romSize, (unsigned)header->ramSize, header->name
+  );
+}
+
+
 bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
   uint8_t* romData = (uint8_t*) data;
-  // if smaller than smallest possible, don't load
   if(length < 0x8000) {
     printf("Failed to load rom: rom to small (%d bytes)\n", length);
     return false;
   }
-  // check headers
+
   CartHeader headers[6];
   memset(headers, 0, sizeof(headers));
   for(int i = 0; i < 6; i++) {
     headers[i].score = -50;
   }
-  if(length >= 0x8000) readHeader(data, length, 0x7fc0, &headers[0]); // lorom
-  if(length >= 0x8200) readHeader(data, length, 0x81c0, &headers[1]); // lorom + header
-  if(length >= 0x10000) readHeader(data, length, 0xffc0, &headers[2]); // hirom
-  if(length >= 0x10200) readHeader(data, length, 0x101c0, &headers[3]); // hirom + header
-  if(length >= 0x410000) readHeader(data, length, 0x40ffc0, &headers[4]); // exhirom
-  if(length >= 0x410200) readHeader(data, length, 0x4101c0, &headers[5]); // exhirom + header
-  // see which it is, go backwards to allow picking ExHiROM over HiROM for roms with headers in both spots
-  int max = 0;
+
+  if(length >= 0x8000) readHeader(data, length, 0x7fc0, &headers[0]);
+  if(length >= 0x8200) readHeader(data, length, 0x81c0, &headers[1]);
+  if(length >= 0x10000) readHeader(data, length, 0xffc0, &headers[2]);
+  if(length >= 0x10200) readHeader(data, length, 0x101c0, &headers[3]);
+  if(length >= 0x410000) readHeader(data, length, 0x40ffc0, &headers[4]);
+  if(length >= 0x410200) readHeader(data, length, 0x4101c0, &headers[5]);
+
+  for(int i = 0; i < 6; i++) {
+    logHeaderCandidate(i, &headers[i]);
+  }
+
+  int max = -9999;
   int used = 0;
   for(int i = 5; i >= 0; i--) {
     if(headers[i].score > max) {
@@ -76,28 +113,28 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
       used = i;
     }
   }
+
+  printf("Header slot: %d score=%d map=%s\n", used, headers[used].score, cartTypeName(headers[used].cartType));
+
   if(used & 1) {
-    // odd-numbered ones are for headered roms
     memmove(romData, romData + 0x200, length - 0x200);
     length -= 0x200;
   }
-  // check if we can load it
+
   if(headers[used].cartType > 3) {
     printf("Failed to load rom: unsupported type (%d)\n", headers[used].cartType);
     return false;
   }
-  // expand to a power of 2
+
   int newLength = 0x8000;
-  while(true) {
-    if(length <= newLength) {
-      break;
-    }
+  while(length > newLength) {
     newLength *= 2;
   }
   if(newLength > runtimeRomBufferLimit) {
     printf("Failed to load rom: expanded size too large (%d bytes)\n", newLength);
     return false;
   }
+
   int test = 1;
   int currentLength = length;
   while(currentLength != newLength) {
@@ -107,21 +144,22 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
     }
     test *= 2;
   }
-  // load it
-  const char* typeNames[4] = {"(none)", "LoROM", "HiROM", "ExHiROM"};
-  printf("Loaded %s rom (%s)\n", typeNames[headers[used].cartType], headers[used].pal ? "PAL" : "NTSC");
+
+  int effectiveRamSize = (int)headers[used].ramSize;
+  if(effectiveRamSize < 0) effectiveRamSize = 0;
+  if(effectiveRamSize > 0x20000) effectiveRamSize = 0x20000;
+
+  printf("Loaded %s rom (%s)\n", cartTypeName(headers[used].cartType), headers[used].pal ? "PAL" : "NTSC");
   printf("\"%s\"\n", headers[used].name);
-  int bankSize = used >= 2 ? 0x10000 : 0x8000; // 0, 1: LoROM, else HiROM
   printf(
-    "%s banks: %d, ramsize: %d\n",
-    bankSize == 0x8000 ? "32K" : "64K", newLength / bankSize, headers[used].chips > 0 ? headers[used].ramSize : 0
+    "type=%u copro=%u chips=%u rawRam=%u effectiveRam=%d expandedRom=%d\n",
+    headers[used].type, headers[used].coprocessor, headers[used].chips,
+    (unsigned)headers[used].ramSize, effectiveRamSize, newLength
   );
-  cart_load_owned(
-    snes->cart, headers[used].cartType,
-    romData, newLength, headers[used].chips > 0 ? headers[used].ramSize : 0
-  );
-  snes_reset(snes, true); // reset after loading
-  snes->palTiming = headers[used].pal; // set region
+
+  cart_load_owned(snes->cart, headers[used].cartType, romData, newLength, effectiveRamSize);
+  snes_reset(snes, true);
+  snes->palTiming = headers[used].pal;
   return true;
 }
 
@@ -216,8 +254,8 @@ static void readHeader(const uint8_t* data, int length, int location, CartHeader
   header->type = data[location + 0x15] & 0xf;
   header->coprocessor = data[location + 0x16] >> 4;
   header->chips = data[location + 0x16] & 0xf;
-  header->romSize = 0x400 << data[location + 0x17];
-  header->ramSize = 0x400 << data[location + 0x18];
+  header->romSize = decodeHeaderSizeField(data[location + 0x17]);
+  header->ramSize = decodeHeaderSizeField(data[location + 0x18]);
   header->region = data[location + 0x19];
   header->maker = data[location + 0x1a];
   header->version = data[location + 0x1b];
@@ -247,8 +285,8 @@ static void readHeader(const uint8_t* data, int length, int location, CartHeader
       }
     }
     header->gameCode[4] = 0;
-    header->flashSize = 0x400 << data[location - 4];
-    header->exRamSize = 0x400 << data[location - 3];
+    header->flashSize = decodeHeaderSizeField(data[location - 4]);
+    header->exRamSize = decodeHeaderSizeField(data[location - 3]);
     header->specialVersion = data[location - 2];
     header->exCoprocessor = data[location - 1];
   } else if(data[location + 0x14] == 0) {
@@ -259,10 +297,13 @@ static void readHeader(const uint8_t* data, int length, int location, CartHeader
   header->pal = (header->region >= 0x2 && header->region <= 0xc) || header->region == 0x11;
   header->cartType = location < 0x9000 ? 1 : 2;
   if(location > 0x400000) header->cartType = 3;
+  if(header->cartType == 1 && header->type == 1) header->score += 2;
+  if(header->cartType == 2 && header->type == 1) header->score += 2;
   // get score
   // TODO: check name, maker/game-codes (if V3) for ASCII, more vectors,
   //   more first opcode, rom-sizes (matches?), type (matches header location?)
   int score = 0;
+  score += countPrintableAscii(header->name, 21) >= 8 ? 6 : -6;
   score += (header->speed == 2 || header->speed == 3) ? 5 : -4;
   score += (header->type <= 3 || header->type == 5) ? 5 : -2;
   score += (header->coprocessor <= 5 || header->coprocessor >= 0xe) ? 5 : -2;
